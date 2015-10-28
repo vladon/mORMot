@@ -782,25 +782,28 @@ type
   // methods to supply the actual process (e.g. set a background thread)
   TDDDAdministratedDaemon = class(TCQRSService,IAdministratedDaemon)
   protected
-    fAdministrationServer: TSQLRestServer;
-    fAdministrationServerOwned: boolean;
     fLogClass: TSynLogClass;
     fStatus: TDDDAdministratedDaemonStatus;
     fFinished: TEvent;
     fRemoteLog: TSynLogCallbacks;
     fInternalDatabases: TSQLRestDynArray;
     fInternalSettings: TObject;
+    fAdministrationServer: TSQLRestServer;
+    fAdministrationServerOwned: boolean;
+    fAdministrationHTTPServer: TObject;
     // return TRUE e.g. if TDDDAdministratedThreadDaemon.fThread<>nil
     function InternalIsRunning: boolean; virtual; abstract;
     // should start the daemon: e.g. set TDDDAdministratedThreadDaemon.fThread
     procedure InternalStart; virtual; abstract;
     // return TRUE and set Status (e.g. from monitoring info) on success
-    function InternalRetrieveState(var Status: variant): boolean; virtual; abstract;
+    // - this default implement returns the system memory info as current state
+    function InternalRetrieveState(var Status: variant): boolean; virtual; 
     // should end the daemon: e.g. TDDDAdministratedThreadDaemon.fThread := nil
     procedure InternalStop; virtual;
     // set the list of published TSQLRestInstances - InternalStop would release it
     procedure PublishORMTables(const Rest: array of TSQLRest); virtual;
     function PublishedORM(const DatabaseName: RawUTF8): TSQLRest;
+    procedure SetInternalSettings(Settings: TObject); virtual;
   public
     /// initialize the administrable service/daemon
     // - aAdministrationServer.ServiceDefine(IAdministratedDaemon) will be
@@ -860,6 +863,13 @@ type
     procedure WaitUntilHalted; virtual;
     /// access to the associated loging class
     property LogClass: TSynLogClass read fLogClass;
+    /// access to the associated internal settings
+    // - is defined as an opaque TObject instance, to avoid unneeded dependencies
+    property InternalSettings: TObject read fInternalSettings write SetInternalSettings;
+    /// reference to the WebSockets/HTTP server publishing AdministrationServer
+    // - is defined as an opaque TObject instance, to avoid unneeded dependencies
+    property AdministrationHTTPServer: TObject
+      read fAdministrationHTTPServer write fAdministrationHTTPServer;
   published
     /// the current status of the service/daemon
     property Status: TDDDAdministratedDaemonStatus read fStatus;
@@ -867,6 +877,9 @@ type
     // - e.g. from named pipe local communication on Windows
     property AdministrationServer: TSQLRestServer read fAdministrationServer;
   end;
+
+  /// type used to define a class kind of TDDDAdministratedDaemon
+  TDDDAdministratedDaemonClass = class of TDDDAdministratedDaemon;
 
   /// abstract class to implement an TThread-based administrable service/daemon
   // - inherited class should override InternalStart and InternalRetrieveState
@@ -2072,6 +2085,7 @@ begin
   if InternalIsRunning then
     Halt(dummy);
   try
+    FreeAndNil(fAdministrationHTTPServer);
     inherited Destroy;
     fFinished.Free;
     FreeAndNil(fRemoteLog);
@@ -2127,15 +2141,17 @@ begin
   CqrsBeginMethod(qaNone,result);
   if fStatus<>dsStarted then
     CqrsSetResultError(cqrsBadRequest) else begin
-    CqrsSetResult(RetrieveState(Information));
+    if InternalRetrieveState(Information) then
     try
       InternalStop; // always stop
       fStatus := dsStopped;
       fLogClass.Add.Log(sllDDDInfo,'Stopped: %',[Information],self);
+      CqrsSetResult(cqrsSuccess);
     except
       on E: Exception do
         CqrsSetResult(E);
-    end;
+    end else
+      CqrsSetResult(cqrsInternalError);
   end;
 end;
 
@@ -2230,18 +2246,23 @@ var rest: TSQLRest;
     doc: TDocVariantData;
     valid: Boolean;
     status: variant;
+    res: TCQRSResult;
     mem: TSynMonitorMemory;
     disk: TSynMonitoryDisk;
+    cmd: integer;
 begin
   result.Header := JSON_CONTENT_TYPE_HEADER_VAR;
   result.Status := HTML_SUCCESS;
   if SQL='' then
     exit;
-  if SQL[1]='#' then
-    case IdemPCharArray(@SQL[2],['STATE','SETTING','VERSION','COMPUTER','LOG',
-      'CHAT','HELP']) of // 'HELP' should be the last one on the list
+  if SQL[1]='#' then begin
+    cmd := IdemPCharArray(@SQL[2],['STATE','SETTING','VERSION','COMPUTER','LOG',
+      'CHAT','STARTDAEMON','STOPDAEMON','RESTARTDAEMON','HELP']);
+       // 'HELP' should be the last one on the list
+    case cmd of
     0: if InternalRetrieveState(status) then
-         result.Content := VariantSaveJSON(status);
+         result.Content := VariantSaveJSON(status) else
+         result.Content := '"Daemon seems stopped"';
     1: if fInternalSettings<>nil then begin
         if SQL[10]=' ' then begin
           Split(copy(SQL,11,maxInt),'=',name,value);
@@ -2294,10 +2315,27 @@ begin
     4: result.Content := ObjectToJSON(fLogClass.Add,[woEnumSetsAsText]);
     5: fLogClass.Add.Log(sllMonitoring,'[CHAT] % %',
          [ServiceContext.Request.InHeader['remoteip'],copy(SQL,7,maxInt)]);
-    else 
-      result.Content := '"Enter either a SQL request, or one of the following commands:|'+
-        '|#state|#settings|#settings full.path=value|#version|#computer|#log|#help"';
+    6,7,8: begin // 6=start/7=stop/8=restart
+      if cmd=6 then
+        res := cqrsSuccess else
+        res := Stop(status);
+      if res=cqrsSuccess then begin
+        if cmd<>7 then
+          res := Start;
+        if res=cqrsSuccess then
+         result.Content := VariantSaveJSON(status) else
+         result.Content := JSONEncode(['errorStart',ToText(res)^,
+           'stopStatus',status]);
+       end else
+         result.Content := JSONEncode(['errorStop',ToText(res)^]);
+       exit;
     end;
+    else
+      result.Content := '"Enter either a SQL request, or one of the following commands:|'+
+        '|#state|#settings|#settings full.path=value|#version|#computer|#log|#startdaemon'+
+        '|#stopdaemon|#restartdaemon|#help"';
+    end;
+  end;
   rest := PublishedORM(DatabaseName);
   if rest<>nil then
     rest.AdministrationExecute(DatabaseName,SQL,RawJSON(result.Content));
@@ -2344,6 +2382,17 @@ begin
   fInternalDatabases := nil;
 end;
 
+function TDDDAdministratedDaemon.InternalRetrieveState(
+  var Status: variant): boolean;
+begin
+  Status := _ObjFast(['SystemMemory',TSynMonitorMemory.ToVariant]);
+  result := true;
+end;
+
+procedure TDDDAdministratedDaemon.SetInternalSettings(Settings: TObject);
+begin
+  fInternalSettings := Settings;
+end;
 
 
 { TDDDAdministratedThreadDaemon }

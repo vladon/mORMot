@@ -2731,7 +2731,7 @@ type
   // have to manually retrieve the record, using a integer(IDField) typecast)
   // - handle TSQLRecordMany descendant properties as an "has many" instance (this
   // is a particular case of TSQLRecord: it won't contain pointer(ID), but an object)
-  // - handle TRecordReference properties as INTEGER RecordRef-like value
+  // - handle TRecordReference properties as INTEGER (64 bit) RecordRef-like value
   //  (use TSQLRest.Retrieve(Reference) to get a record content)
   // - handle TSQLRawBlob properties as BLOB
   // - handle dynamic arrays as BLOB, in the TDynArray.SaveTo binary format (is able
@@ -3318,7 +3318,6 @@ type
   /// information about an ordinal Int32 published property
   TSQLPropInfoRTTIInt32 = class(TSQLPropInfoRTTI)
   protected
-    procedure SetInt32(Instance: TObject; Value: integer);
     procedure CopySameClassProp(Source: TObject; DestInfo: TSQLPropInfo; Dest: TObject); override;
   public
     procedure SetValue(Instance: TObject; Value: PUTF8Char; wasString: boolean); override;
@@ -4674,11 +4673,12 @@ type
   // stored in the table itself, but in a pivot table
   // - sftObject for e.g. TStrings TRawUTF8List TCollection instances
   {$ifdef CPU64}
-  TSQLPropInfoRTTIInstance = class(TSQLPropInfoRTTIInt64){$else}
-  TSQLPropInfoRTTIInstance = class(TSQLPropInfoRTTIInt32){$endif}
+  TSQLPropInfoRTTIInstance = class(TSQLPropInfoRTTIInt64)
+  {$else}
+  TSQLPropInfoRTTIInstance = class(TSQLPropInfoRTTIInt32)
+  {$endif}
   protected
     fObjectClass: TClass;
-    fCascadeDelete: boolean;
   public
     /// will setup the corresponding ObjectClass property
     constructor Create(aPropInfo: PPropInfo; aPropIndex: integer; aSQLFieldType: TSQLFieldType); override;
@@ -4691,6 +4691,18 @@ type
     /// direct access to the property class
     // - can be used e.g. for TSQLRecordMany properties
     property ObjectClass: TClass read fObjectClass;
+  end;
+
+  /// information about a TRecordReference/TRecordReferenceToBeDeleted
+  // published property
+  // - identified as a sftRecord kind of property
+  TSQLPropInfoRTTIRecordReference = class(TSQLPropInfoRTTIInt64)
+  protected
+    fCascadeDelete: boolean;
+  public
+    /// will identify TRecordReferenceToBeDeleted kind of field, and
+    // setup the corresponding CascadeDelete property
+    constructor Create(aPropInfo: PPropInfo; aPropIndex: integer; aSQLFieldType: TSQLFieldType); override;
     /// TRUE if this sftRecord is a TRecordReferenceToBeDeleted
     property CascadeDelete: boolean read fCascadeDelete;
   end;
@@ -4699,16 +4711,15 @@ type
   // - identified as a sftTID kind of property, optionally tied to a TSQLRecord
   // class, via its custom type name, e.g.
   // ! TSQLRecordClientID = type TID;  ->  TSQLRecordClient class
-  TSQLPropInfoRTTITID = class(TSQLPropInfoRTTIInt64)
+  TSQLPropInfoRTTITID = class(TSQLPropInfoRTTIRecordReference)
   protected
     fRecordClass: TSQLRecordClass;
-    fCascadeDelete: boolean;
   public
     /// will setup the corresponding RecordClass property from the TID type name
     // - the TSQLRecord type should have previously been registered to the
     // TJSONSerializer.RegisterClassForJSON list, e.g. in TSQLModel.Create, so
     // that e.g. 'TSQLRecordClientID' type name would match TSQLRecordClient
-    // - in addition, the '...ToBeDeletedID' name pattern should set CascadeDelete
+    // - in addition, the '...ToBeDeletedID' name pattern would set CascadeDelete
     constructor Create(aPropInfo: PPropInfo; aPropIndex: integer; aSQLFieldType: TSQLFieldType); override;
     /// the TSQLRecord class associated to this TID
     // - is computed from its type name - for instance, if you define:
@@ -18516,7 +18527,7 @@ const
      ftInt64,     // sftSet
      ftInt64,     // sftInteger
      ftInt64,     // sftID = TSQLRecord(aID)
-     ftInt64,     // sftRecord = TRecordReference
+     ftInt64,     // sftRecord = TRecordReference = RecordRef
      ftInt64,     // sftBoolean
      ftDouble,    // sftFloat
      ftDate,      // sftDateTime
@@ -18852,10 +18863,10 @@ begin
         C := TSQLPropInfoRTTIDateTime;
       sftID: // = TSQLRecord(aID)
         C := TSQLPropInfoRTTIID;
-      sftTID:
+      sftTID: // = TID or T*ID
         C := TSQLPropInfoRTTITID;
-      sftRecord: // = TRecordReference
-        C := TSQLPropInfoRTTIInstance;
+      sftRecord: // = TRecordReference/TRecordReferenceToBeDeleted
+        C := TSQLPropInfoRTTIRecordReference;
       sftRecordVersion:
         C := TSQLPropInfoRTTIRecordVersion;
       sftMany:
@@ -18962,7 +18973,7 @@ end;
 procedure TSQLPropInfoRTTIInt32.CopySameClassProp(Source: TObject; DestInfo: TSQLPropInfo;
   Dest: TObject);
 begin
-  TSQLPropInfoRTTIInt32(DestInfo).SetInt32(Dest,fPropInfo.GetOrdProp(Source));
+  TSQLPropInfoRTTIInt32(DestInfo).fPropInfo.SetOrdProp(Dest,fPropInfo.GetOrdProp(Source));
 end;
 
 procedure TSQLPropInfoRTTIInt32.GetBinary(Instance: TObject; W: TFileBufferWriter);
@@ -19011,31 +19022,20 @@ end;
 function TSQLPropInfoRTTIInt32.SetBinary(Instance: TObject; P: PAnsiChar): PAnsiChar;
 begin
   if P<>nil then
-    SetInt32(Instance,integer(FromVarUInt32(PByte(P))));
+    fPropInfo.SetOrdProp(Instance,integer(FromVarUInt32(PByte(P))));
   result := P;
-end;
-
-procedure TSQLPropInfoRTTIInt32.SetInt32(Instance: TObject; Value: integer);
-begin
-  {$ifdef USETYPEINFO}
-  if fPropInfo.SetterIsField then
-    PInteger(fPropInfo.SetterAddr(Instance))^ := Value else
-  if (fPropInfo.SetProc=0) and fPropInfo.GetterIsField then
-    PInteger(fPropInfo.GetterAddr(Instance))^ := Value else
-  {$endif}
-    fPropInfo.SetOrdProp(Instance,Value);
 end;
 
 procedure TSQLPropInfoRTTIInt32.SetValue(Instance: TObject; Value: PUTF8Char;
   wasString: boolean);
 begin
-  SetInt32(Instance,GetInteger(Value));
+  fPropInfo.SetOrdProp(Instance,GetInteger(Value));
 end;
 
 function TSQLPropInfoRTTIInt32.SetFieldSQLVar(Instance: TObject; const aValue: TSQLVar): boolean;
 begin
   if aValue.VType=ftInt64 then begin
-    SetInt32(Instance,aValue.VInt64);
+    fPropInfo.SetOrdProp(Instance,aValue.VInt64);
     result := true;
   end else
     result := inherited SetFieldSQLVar(Instance,aValue);
@@ -19549,8 +19549,6 @@ constructor TSQLPropInfoRTTIInstance.Create(aPropInfo: PPropInfo; aPropIndex: in
 begin
   inherited Create(aPropInfo,aPropIndex,aSQLFieldType);
   fObjectClass := fPropType^.ClassType^.ClassType;
-  if aSQLFieldType=sftRecord then
-    fCascadeDelete:= IdemPropName(fPropType^.Name,'TRecordReferenceToBeDeleted')
 end;
 
 function TSQLPropInfoRTTIInstance.GetInstance(Instance: TObject): TObject;
@@ -19561,6 +19559,16 @@ end;
 procedure TSQLPropInfoRTTIInstance.SetInstance(Instance, Value: TObject);
 begin
   fPropInfo.SetOrdProp(Instance,PtrInt(Value));
+end;
+
+
+{ TSQLPropInfoRTTIRecordReference }
+
+constructor TSQLPropInfoRTTIRecordReference.Create(aPropInfo: PPropInfo;
+  aPropIndex: integer; aSQLFieldType: TSQLFieldType);
+begin
+  inherited Create(aPropInfo,aPropIndex,aSQLFieldType);
+  fCascadeDelete := IdemPropName(fPropType^.Name,'TRecordReferenceToBeDeleted')
 end;
 
 
@@ -22729,7 +22737,7 @@ begin
             W.Add('"');
             W.AddJSONEscape(U^,StrLen(U^));
             W.Add('"');
-        end;
+          end;
         W.Add(',');
         inc(U); // points to next value
       end;
@@ -25692,7 +25700,7 @@ i64:    SetInt64Prop(Dest,GetInt64Prop(Source)) else
       if kD=tkFloat then
         DestInfo.SetFloatProp(Dest,GetFloatProp(Source));
     {$ifdef FPC}tkAString,{$endif}
-    tkLString: begin
+    tkLString:
       if kD=tkLString then begin
         GetLongStrProp(Source,Value);
         DestInfo.SetLongStrProp(Dest,Value);
@@ -25701,17 +25709,16 @@ str:  if kD in tkStringTypes then begin
         GetLongStrValue(Source,RawUTF8(Value));
         DestInfo.SetLongStrValue(Dest,RawUTF8(Value));
       end;
-    end;
     {$ifdef UNICODE}
     tkUString:
       if kD=tkUString then
-        SetUnicodeStrProp(Dest,GetUnicodeStrProp(Source)) else
+        DestInfo.SetUnicodeStrProp(Dest,GetUnicodeStrProp(Source)) else
         goto str;
     {$endif}
     tkWString:
       if kD=tkWString then begin
         GetWideStrProp(Source,WS);
-        SetWideStrProp(Dest,WS);
+        DestInfo.SetWideStrProp(Dest,WS);
       end else
         goto str;
     tkDynArray:
@@ -25726,7 +25733,7 @@ str:  if kD in tkStringTypes then begin
     tkVariant:
       if kD=tkVariant then begin
         GetVariantProp(Source,V);
-        SetVariantProp(Dest,V);
+        DestInfo.SetVariantProp(Dest,V);
       end;
     {$endif}
   end; // note: tkString (shortstring) and tkInterface not handled
@@ -29559,10 +29566,8 @@ var j,f: integer;
       FieldTableIndex := GetTableIndexSafe(FieldTable,false);
       if FieldTableIndex<0 then
         FieldTableIndex := -2; // allow lazy table index identification
-      if aFieldType.InheritsFrom(TSQLPropInfoRTTIInstance) then
-        CascadeDelete := TSQLPropInfoRTTIInstance(aFieldType).CascadeDelete else
-      if aFieldType.InheritsFrom(TSQLPropInfoRTTITID) then
-        CascadeDelete := TSQLPropInfoRTTITID(aFieldType).CascadeDelete;
+      if aFieldType.InheritsFrom(TSQLPropInfoRTTIRecordReference) then
+        CascadeDelete := TSQLPropInfoRTTIRecordReference(aFieldType).CascadeDelete;
     end;
   end;
 
@@ -42248,21 +42253,21 @@ type
   TJSONObject =
     (oNone, oException, oList, oObjectList, {$ifndef LVCL}oCollection,{$endif}
      oUtfs, oStrings, oSQLRecord, oSQLMany, oPersistent, oPersistentPassword,
-     oSynMonitor, oCustom);
+     oSynMonitor, oSQLTable, oCustom);
 
 function JSONObject(aClassType: TClass; out aCustomIndex: integer;
   aExpectedReadWriteTypes: TJSONCustomParserExpectedDirections): TJSONObject;
 const
-  MAX = {$ifdef LVCL}13{$else}14{$endif};
+  MAX = {$ifdef LVCL}14{$else}15{$endif};
   TYP: array[0..MAX] of TClass = ( // all classes types gathered in CPU L1 cache
     TObject,Exception,ESynException,TList,TObjectList,TPersistent,
     TSynPersistentWithPassword,TSynPersistent,TInterfacedObjectWithCustomCreate,
-    TSynMonitor,TSQLRecordMany,TSQLRecord,TStrings,TRawUTF8List
+    TSynMonitor,TSQLRecordMany,TSQLRecord,TStrings,TRawUTF8List,TSQLTable
     {$ifndef LVCL},TCollection{$endif});
   OBJ: array[0..MAX] of TJSONObject = (
     oNone,oException,oPersistent,oList,oObjectList,oPersistent,
     oPersistentPassword,oPersistent,oPersistent,
-    oSynMonitor,oSQLMany,oSQLRecord,oStrings,oUtfs
+    oSynMonitor,oSQLMany,oSQLRecord,oStrings,oUtfs,oSQLTable
     {$ifndef LVCL},oCollection{$endif});
 var i: integer;
 begin
@@ -44703,6 +44708,7 @@ end;
 procedure TJSONSerializer.WriteObject(Value: TObject; Options: TTextWriterWriteObjectOptions);
 var Added: boolean;
     CustomComment: RawUTF8;
+
   procedure HR(P: PPropInfo=nil);
   begin
     if woHumanReadable in Options then begin
@@ -44720,6 +44726,7 @@ var Added: boolean;
       Add(' ');
     Added := true;
   end;
+
 var P: PPropInfo;
     i, j, V, c, codepage: integer;
     Obj: TObject;
@@ -44729,6 +44736,7 @@ var P: PPropInfo;
 {$endif}
     Str: TStrings absolute Value;
     Utf: TRawUTF8List absolute Value;
+    Table: TSQLTable absolute Value;
     aClassType: TClass;
     Kind: TTypeKind;
     PS: PShortString;
@@ -44769,6 +44777,8 @@ begin
       exit;
     end;
   // handle JSON arrays
+  oSQLTable:
+    Table.GetJSONValues(Stream,true);
   oList, oObjectList, {$ifndef LVCL}oCollection,{$endif} oUtfs, oStrings: begin
     HR;
     Add('['); // write as JSON array of JSON objects

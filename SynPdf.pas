@@ -37,12 +37,14 @@ unit SynPdf;
    FalconB
    Florian Grummel
    Harald Simon
-   Ondrej (reddwarf)
-   Sinisa (sinisav)
-   Pierre le Riche
+   Josh Kelley (joshkel)
+   Marsh
    MChaos
    Mehrdad Momeni (nosa)
-   Marsh
+   Ondrej (reddwarf)
+   Pierre le Riche
+   Sinisa (sinisav)
+   Sundazer
 
   Alternatively, the contents of this file may be used under the terms of
   either the GNU General Public License Version 2 or later (the "GPL"), or
@@ -370,6 +372,9 @@ const
   MWT_LEFTMULTIPLY = 2;
   MWT_RIGHTMULTIPLY = 3;
   MWT_SET = 4;
+  {$NODEFINE MWT_IDENTITY}
+  {$NODEFINE MWT_LEFTMULTIPLY}
+  {$NODEFINE MWT_RIGHTMULTIPLY}
 
 {  some low-level record definition for True Type format table reading }
 
@@ -2736,7 +2741,7 @@ function RawUTF8ToPDFString(const Value: RawUTF8): PDFString;
 /// convert an unsigned integer into a PDFString text
 function UInt32ToPDFString(Value: Cardinal): PDFString;
 
-/// convert a date, into PDF string format, i.e. as 'D:20100414113241'
+/// convert a date, into PDF string format, i.e. as 'D:20100414113241Z'
 function _DateTimeToPdfDate(ADate: TDateTime): TPdfDate;
 
 /// decode PDF date, encoded as 'D:20100414113241'
@@ -3041,6 +3046,21 @@ function ScriptShape(hdc: HDC; var psc: pointer; const pwcChars: PWideChar;
 function ScriptApplyDigitSubstitution(
     const psds: Pointer; const psControl: pointer;
     const psState: pointer): HRESULT; stdcall; external Usp10;
+
+// C++Builder code should #include <usp10.h> directly instead of using these.
+{$NODEFINE TScriptState }
+{$NODEFINE PScriptState }
+{$NODEFINE TScriptAnalysis }
+{$NODEFINE PScriptAnalysis }
+{$NODEFINE TScriptVisAttr }
+{$NODEFINE PScriptVisAttr }
+{$NODEFINE TScriptItem }
+{$NODEFINE PScriptItem }
+{$NODEFINE ScriptItemize }
+{$NODEFINE ScriptGetProperties }
+{$NODEFINE ScriptLayout }
+{$NODEFINE ScriptShape }
+{$NODEFINE ScriptApplyDigitSubstitution }
 
 {$endif USE_UNISCRIBE}
 
@@ -4037,11 +4057,12 @@ var D: array[2..8] of word;
 begin
   DecodeDate(ADate,D[2],D[3],D[4]);
   DecodeTime(ADate,D[5],D[6],D[7],D[8]);
-  SetLength(result,16);
+  SetLength(result,17);
   YearToPChar(D[2],pointer(PtrInt(result)+2));
   PWord(result)^ := ord('D')+ord(':')shl 8;
   for i := 3 to 7 do
     PWordArray(pointer(result))^[i] := TwoDigitLookupW[D[i]];
+  PByteArray(result)[16] := ord('Z');
 //  Assert(abs(_PdfDateToDateTime(result)-ADate)<MSecsPerSec);
 end;
 
@@ -4057,7 +4078,7 @@ const // not existing before Delphi 7
 function _PdfDateToDateTime(const AText: TPdfDate): TDateTime;
 var Y,M,D, H,MI,SS: cardinal;
 begin
-  if Length(AText)<>16 then
+  if Length(AText)<16 then
     EConvertError.CreateRes(@SDateEncodeError);
   Y := ord(AText[3])*1000+ord(AText[4])*100+ord(AText[5])*10+ord(AText[6])
     -(48+480+4800+48000);
