@@ -33,6 +33,7 @@ unit SynCommons;
    - Alfred Glaenzer (alf)
    - BigStar
    - itSDS
+   - kevinday
    - mazinsw
    - Marius Maximus (mariuszekpl)
    - RalfS
@@ -4805,6 +4806,13 @@ type
     // - this constructor does nothing, but is declared as virtual so that
     // inherited classes may safely override this default void implementation
     constructor Create; virtual;
+    /// used to mimic TInterfacedObject reference counting
+    // - Release=true will call TInterfacedObject._Release
+    // - Release=false will call TInterfacedObject._AddRef
+    // - could be used to emulate proper reference counting of the instance
+    // via interfaces variables, but still storing plain class instances
+    // (e.g. in a global list of instances)
+    procedure RefCountUpdate(Release: boolean); virtual;
   end;
 
   /// our own empowered TPersistent-like parent class
@@ -4815,11 +4823,19 @@ type
   // - for best performance, any type inheriting from this class will bypass
   // some regular steps: do not implement interfaces or use TMonitor with them!
   TSynPersistent = class(TObject)
+  protected
+    // this default implementation will call AssignError()
+    procedure AssignTo(Dest: TSynPersistent); virtual;
+    procedure AssignError(Source: TSynPersistent);
   public
     /// this virtual constructor will be called at instance creation
     // - this constructor does nothing, but is declared as virtual so that
     // inherited classes may safely override this default void implementation
     constructor Create; virtual;
+    /// allows to implement a TPersistent-like assignement mechanism
+    // - inherited class should override AssignTo() protected method
+    // to implement the proper assignment
+    procedure Assign(Source: TSynPersistent); virtual;
     {$ifndef FPC_OR_PUREPASCAL}
     /// optimized x86 asm initialization code
     // - warning: this optimized version won't initialize the vmtIntfTable
@@ -6277,6 +6293,17 @@ type
     jsonCompact, jsonHumanReadable,
     jsonUnquotedPropName, jsonUnquotedPropNameCompact);
 
+  /// the potential places were TTextWriter.HtmlEscape should process
+  // proper HTML string escaping
+  // $  < > & "  ->   &lt; &gt; &amp; &quote;
+  // by default (hfAnyWhere)
+  // $  < > &  ->   &lt; &gt; &amp;
+  // outside HTML attributes (hfOutsideAttributes)
+  // $  & "  ->   &amp; &quote;
+  // within HTML attributes (hfWithinAttributes)
+  TTextWriterHTMLFormat = (
+    hfAnyWhere, hfOutsideAttributes, hfWithinAttributes);
+
   /// simple writer to a Stream, specialized for the TEXT format
   // - use an internal buffer, faster than string+string
   // - some dedicated methods is able to encode any data with JSON escape
@@ -6556,14 +6583,13 @@ type
     // single quotes in a row - as in Pascal."
     procedure AddQuotedStr(Text: PUTF8Char; Quote: AnsiChar; TextLen: integer=0);
     /// append some chars, escaping all HTML special chars as expected
-    // - i.e.   < > & "  as   &lt; &gt; &amp; &quote;
-    procedure AddHtmlEscape(Text: PUTF8Char); overload;
+    procedure AddHtmlEscape(Text: PUTF8Char; Fmt: TTextWriterHTMLFormat=hfAnyWhere); overload;
     /// append some chars, escaping all HTML special chars as expected
-    // - i.e.   < > & "  as   &lt; &gt; &amp; &quote;
-    procedure AddHtmlEscape(Text: PUTF8Char; TextLen: integer); overload;
+    procedure AddHtmlEscape(Text: PUTF8Char; TextLen: integer;
+      Fmt: TTextWriterHTMLFormat=hfAnyWhere); overload;
     /// append some chars, escaping all HTML special chars as expected
-    // - i.e.   < > & "  as   &lt; &gt; &amp; &quote;
-    procedure AddHtmlEscapeString(const Text: string);
+    procedure AddHtmlEscapeString(const Text: string;
+      Fmt: TTextWriterHTMLFormat=hfAnyWhere);
     /// convert some wiki-like text into proper HTML
     // - convert all #13#10 into <p>...</p>, *..* into <i>..</i> and +..+ into
     // <b>..</b>, then escape http:// as <a href=...> and any HTML special chars
@@ -19818,7 +19844,8 @@ function FileOpenSequentialRead(const FileName: string): Integer;
 begin
   {$ifdef MSWINDOWS}
   result := CreateFile(pointer(FileName),GENERIC_READ,
-    FILE_SHARE_READ,nil,OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,0);
+    FILE_SHARE_READ or FILE_SHARE_WRITE,nil, // same as fmShareDenyNone 
+    OPEN_EXISTING,FILE_FLAG_SEQUENTIAL_SCAN,0);
   {$else}
   result := FileOpen(FileName,fmOpenRead or fmShareDenyNone);
   {$endif MSWINDOWS}
@@ -22066,9 +22093,11 @@ begin
   F := FileOpenSequentialRead(FileName);
   if PtrInt(F)>=0 then begin
     Size := GetFileSize(F,nil);
-    SetLength(result,Size);
-    if FileRead(F,pointer(Result)^,Size)<>Size then
-      result := '';
+    if Size>0 then begin
+      SetLength(result,Size);
+      if FileRead(F,pointer(result)^,Size)<>Size then
+        result := '';
+    end;
     FileClose(F);
   end;
 end;
@@ -24144,7 +24173,6 @@ begin
     if GetNextUTF8Upper(p)<>ord(up^) then
       exit;
     inc(up);
-    inc(p);
   end;
   result := true;
 end;
@@ -39134,6 +39162,13 @@ constructor TInterfacedObjectWithCustomCreate.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
 
+procedure TInterfacedObjectWithCustomCreate.RefCountUpdate(Release: boolean);
+begin
+  if Release then
+    _Release else
+    _AddRef;
+end;
+
 
 { TSynLocker }
 
@@ -39190,6 +39225,29 @@ end;
 constructor TSynPersistent.Create;
 begin // nothing to do by default - overridden constructor may add custom code
 end;
+
+procedure TSynPersistent.AssignError(Source: TSynPersistent);
+var
+  SourceName: string;
+begin
+  if Source <> nil then
+    SourceName := Source.ClassName else
+    SourceName := 'nil';
+  raise EConvertError.CreateFmt('Cannot assign a %s to a %s', [SourceName, ClassName]);
+end;
+
+procedure TSynPersistent.AssignTo(Dest: TSynPersistent);
+begin
+  Dest.AssignError(Self);
+end;
+
+procedure TSynPersistent.Assign(Source: TSynPersistent);
+begin
+  if Source<>nil then
+    Source.AssignTo(Self) else
+    AssignError(nil);
+end;
+
 
 {$ifndef FPC_OR_PUREPASCAL}
 
@@ -40463,10 +40521,7 @@ begin
   inc(B);
 end;
 
-const
-  HTML_ESCAPE: set of byte = [0,ord('<'),ord('>'),ord('&'),ord('"')];
-
-procedure TTextWriter.AddHtmlEscape(Text: PUTF8Char);
+procedure TTextWriter.AddHtmlEscape(Text: PUTF8Char; Fmt: TTextWriterHTMLFormat);
 var i,beg: PtrInt;
 begin
   if Text=nil then
@@ -40474,12 +40529,24 @@ begin
   i := 0;
   repeat
     beg := i;
-    if not(ord(Text[i]) in HTML_ESCAPE) then begin
-      repeat // it is faster to handle all not-escaped chars at once
-        inc(i);
-      until ord(Text[i]) in HTML_ESCAPE;
-      AddNoJSONEscape(Text+beg,i-beg);
+    case Fmt of
+    hfAnyWhere:
+      while true do
+        if Text[i] in [#0,'&','"','<','>'] then
+          break else
+          inc(i);
+    hfOutsideAttributes:
+      while true do
+        if Text[i] in [#0,'&','<','>'] then
+          break else
+          inc(i);
+    hfWithinAttributes:
+      while true do
+        if Text[i] in [#0,'&','"'] then
+          break else
+          inc(i);
     end;
+    AddNoJSONEscape(Text+beg,i-beg);
     repeat
       case Text[i] of
       #0: exit;
@@ -40494,7 +40561,8 @@ begin
   until false;
 end;
 
-procedure TTextWriter.AddHtmlEscape(Text: PUTF8Char; TextLen: integer);
+procedure TTextWriter.AddHtmlEscape(Text: PUTF8Char; TextLen: integer;
+  Fmt: TTextWriterHTMLFormat);
 var i,beg: PtrInt;
 begin
   if (Text=nil) or (TextLen<=0) then
@@ -40502,15 +40570,27 @@ begin
   i := 0;
   repeat
     beg := i;
-    if not(ord(Text[i]) in HTML_ESCAPE) then begin
-      repeat // it is faster to handle all not-escaped chars at once
-        inc(i);
-      until (ord(Text[i]) in HTML_ESCAPE) or (i>=TextLen);
-      AddNoJSONEscape(Text+beg,i-beg);
+    case Fmt of
+    hfAnyWhere:
+      while i<TextLen do
+        if Text[i] in [#0,'&','"','<','>'] then
+          break else
+          inc(i);
+    hfOutsideAttributes:
+      while i<TextLen do
+        if Text[i] in [#0,'&','<','>'] then
+          break else
+          inc(i);
+    hfWithinAttributes:
+      while i<TextLen do
+        if Text[i] in [#0,'&','"'] then
+          break else
+          inc(i);
     end;
-    if i=TextLen then
-      exit;
+    AddNoJSONEscape(Text+beg,i-beg);
     repeat
+      if i=TextLen then
+        exit;
       case Text[i] of
       #0: exit;
       '<': AddShort('&lt;');
@@ -40524,9 +40604,9 @@ begin
   until false;
 end;
 
-procedure TTextWriter.AddHtmlEscapeString(const Text: string);
+procedure TTextWriter.AddHtmlEscapeString(const Text: string; Fmt: TTextWriterHTMLFormat);
 begin
-  AddHtmlEscape(pointer(StringToUTF8(Text)));
+  AddHtmlEscape(pointer(StringToUTF8(Text)),Fmt);
 end;
 
 procedure TTextWriter.AddHtmlEscapeWiki(P: PUTF8Char);
@@ -40559,7 +40639,7 @@ begin
         if (P^='h') and IdemPChar(P+1,'TTP://') then
           break else
           inc(P);
-      AddHtmlEscape(B,P-B);
+      AddHtmlEscape(B,P-B,hfOutsideAttributes);
       case ord(P^) of
       0: break;
       10,13: begin
@@ -40617,7 +40697,7 @@ begin
       '&': AddShort('&amp;');
       '"': AddShort('&quot;');
       '''': AddShort('&apos;');
-      else break;
+      else break; // should match XML_ESCAPE[] constant above
       end;
       inc(i);
     until false;

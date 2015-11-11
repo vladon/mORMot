@@ -29,6 +29,7 @@ unit SynPdf;
   the Initial Developer. All Rights Reserved.
 
   Contributor(s):
+   Achim Kalwa
    Alexander (chaa)
    aweste
    CoMPi
@@ -279,6 +280,7 @@ unit SynPdf;
   - added TPdfFormWithCanvas class - thanks Harald! see SynPdfFormCanvas.dpr
   - EMR_INTERSECTCLIPRECT fix supplied by Marsh - but patch disabled by default
   - huge UniScribe fixes supplied by Mehrdad Momeni (nosa) - THANKS A LOT!
+  - enhanced clipping process by Achim Kalwa
 
 }
 
@@ -496,6 +498,10 @@ type
   /// The annotation types determines the valid annotation subtype of TPdfDoc
   TPdfAnnotationSubType = (
     asTextNotes, asLink);
+
+  /// The border style of an annotation
+  TPdfAnnotationBorder = (
+    abSolid, abDashed, abBeveled, abInset, abUnderline);
 
   /// Destination Type determines default user space coordinate system of
   // Explicit destinations
@@ -1448,13 +1454,15 @@ type
     function GetXObjectImageName(const Hash: TPdfImageHash; Width, Height: Integer): PDFString;
     /// wrapper to create an annotation
     // - the annotation is set to a specified position of the current page
-    function CreateAnnotation(AType: TPdfAnnotationSubType; const ARect: TPdfRect): TPdfDictionary; overload;
+    function CreateAnnotation(AType: TPdfAnnotationSubType; const ARect: TPdfRect;
+      BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=1): TPdfDictionary;
     /// wrapper to create a Link annotation, specified by a bookmark
     // - the link is set to a specified rectangular position of the current page
     // - if the bookmark name is not existing (i.e. if it no such name has been
     // defined yet via the CreateBookMark method), it's added to the internal
     // fMissingBookmarks list, and will be linked at CreateBookMark method call
-    function CreateLink(const ARect: TPdfRect; const aBookmarkName: RawUTF8): TPdfDictionary;
+    function CreateLink(const ARect: TPdfRect; const aBookmarkName: RawUTF8;
+      BorderStyle: TPdfAnnotationBorder=abSolid; BorderWidth: integer=1): TPdfDictionary;
     /// create an Outline entry at a specified position of the current page
     // - the outline tree is created from the specified numerical level (0=root),
     // just after the item added via the previous CreateOutline call
@@ -2146,13 +2154,13 @@ type
   // and the outline tree is created from the number of leading spaces in the title
   // - pgcBookmark will create a destination at the current position (i.e.
   // the last Y parameter of a Move), with some text supplied as bookmark name
-  // - pgcLink will create a asLink annotation, expecting the data to be filled
-  // with TRect inclusive-inclusive bounding rectangle coordinates, followed by
-  // the corresponding bookmark name
+  // - pgcLink/pgcLinkNoBorder will create a asLink annotation, expecting the data
+  // to be filled with TRect inclusive-inclusive bounding rectangle coordinates,
+  // followed by the corresponding bookmark name
   // - use the GDIComment*() functions to append the corresponding
   // EMR_GDICOMMENT message to a metafile content
   TPdfGDIComment =
-    (pgcOutline, pgcBookmark, pgcLink);
+    (pgcOutline, pgcBookmark, pgcLink, pgcLinkNoBorder);
 
   /// a dictionary wrapper class for the PDF document information fields
   // - all values use the generic VCL string type, and will be encoded
@@ -2782,7 +2790,8 @@ procedure GDICommentBookmark(MetaHandle: HDC; const aBookmarkName: RawUTF8);
 procedure GDICommentOutline(MetaHandle: HDC; const aTitle: RawUTF8; aLevel: Integer);
 
 /// append a EMR_GDICOMMENT message for creating a Link into a specified bookmark
-procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect);
+procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect;
+  NoBorder: boolean);
 
 
 {$ifdef USE_PDFSECURITY}
@@ -3226,7 +3235,8 @@ begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIF
   Windows.GdiComment(MetaHandle,L+2,D);
 end;
 
-procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect);
+procedure GDICommentLink(MetaHandle: HDC; const aBookmarkName: RawUTF8; const aRect: TRect;
+  NoBorder: boolean);
 var Data: RawByteString;
     D: PAnsiChar;
     L: integer;
@@ -3234,7 +3244,9 @@ begin // high(TPdfGDIComment)<$47 so it will never begin with GDICOMMENT_IDENTIF
   L := length(aBookmarkName);
   SetLength(Data,L+(1+sizeof(TRect)));
   D := pointer(Data);
-  D^ := AnsiChar(pgcLink);
+  if NoBorder then
+    D^ := AnsiChar(pgcLinkNoBorder) else
+    D^ := AnsiChar(pgcLink);
   PRect(D+1)^ := aRect;
   MoveFast(pointer(aBookmarkName)^,D[1+sizeof(TRect)],L);
   Windows.GdiComment(MetaHandle,L+(1+sizeof(TRect)),D);
@@ -5531,11 +5543,12 @@ begin
 end;
 
 function TPdfDocument.CreateAnnotation(AType: TPdfAnnotationSubType;
-  const ARect: TPdfRect): TPdfDictionary;
-var FAnnotation: TPdfDictionary;
+  const ARect: TPdfRect; BorderStyle: TPdfAnnotationBorder; BorderWidth: integer): TPdfDictionary;
+var FAnnotation, FBorderStyle: TPdfDictionary;
     aArray: TPdfArray;
     aPage: TPdfPage;
 const FLAGS_PRINT = 4;
+      BS: array [TPdfAnnotationBorder] of PDFString = ('S','D','B','I','U');
 begin
   // create new annotation and set the properties
   FAnnotation := TPdfDictionary.Create(FXref);
@@ -5544,6 +5557,14 @@ begin
   FAnnotation.AddItem('Type', 'Annot');
   FAnnotation.AddItem('Subtype', PDF_ANNOTATION_TYPE_NAMES[ord(AType)]);
   FAnnotation.AddItem('F',FLAGS_PRINT);
+  if (BorderStyle<>abSolid) or (BorderWidth<>1) then begin
+    FBorderStyle := TPdfDictionary.Create(FXRef);
+    if BorderStyle<>abSolid then
+      FBorderStyle.AddItem('S',BS[BorderStyle]);
+    if BorderWidth<>1 then
+      FBorderStyle.AddItem('W',BorderWidth);
+    FAnnotation.AddItem('BS',FBorderStyle);
+  end;
   with ARect do
     FAnnotation.AddItem('Rect',TPdfArray.CreateReals(FXRef,[Left,Top,Right,Bottom]));
   // adding annotation to the current page
@@ -5557,11 +5578,11 @@ begin
   Result := FAnnotation;
 end;
 
-function TPdfDocument.CreateLink(const ARect: TPdfRect;
-  const aBookmarkName: RawUTF8): TPdfDictionary;
+function TPdfDocument.CreateLink(const ARect: TPdfRect; const aBookmarkName: RawUTF8;
+  BorderStyle: TPdfAnnotationBorder; BorderWidth: integer): TPdfDictionary;
 var aDest: TPdfDestination;
 begin
-  result := CreateAnnotation(asLink,ARect);
+  result := CreateAnnotation(asLink,ARect,BorderStyle,BorderWidth);
   with fBookmarks do
     aDest := TPdfDestination(Objects[IndexOf(aBookmarkName)]);
   if aDest=nil then
@@ -8773,7 +8794,7 @@ type
     procedure SetMetaRgn;
     // intersect - clipping
     function IntersectClipRect(const ClpRect: TPdfBox; const CurrRect: TPdfBox): TPdfBox;
-    procedure ExtSelectClipRgn(data: PRgnDataHeader; iMode: DWord);
+    procedure ExtSelectClipRgn(data: PEMRExtSelectClipRgn);
     // get current clipping area
     function GetClipRect: TPdfBox;
     procedure GradientFill(data: PEMGradientFill);
@@ -9183,14 +9204,9 @@ begin
   EMR_SETMETARGN:
     E.SetMetaRgn;
   EMR_EXTSELECTCLIPRGN:
-    E.ExtSelectClipRgn(@PEMRExtSelectClipRgn(R)^.RgnData[0],PEMRExtSelectClipRgn(R)^.iMode);
-  EMR_INTERSECTCLIPRECT: begin
-    ClipRgn := e.IntersectClipRect(e.Canvas.BoxI(PEMRIntersectClipRect(r)^.rclClip,true),ClipRgn);
-    {e.Canvas.Clip; // revert patch supplied by Marsh, which seems to break
-    with e.Canvas.BoxI(PEMRIntersectClipRect(r)^.rclClip,true) do
-      e.Canvas.Rectangle(Left,Top,Width,Height);
-    e.Canvas.EoClip;}
-  end;
+    E.ExtSelectClipRgn(PEMRExtSelectClipRgn(R));
+  EMR_INTERSECTCLIPRECT:
+    ClipRgn := E.IntersectClipRect(E.Canvas.BoxI(PEMRIntersectClipRect(r)^.rclClip,true),ClipRgn);
   EMR_SETMAPMODE:
     MappingMode := PEMRSetMapMode(R)^.iMode;
   EMR_BEGINPATH: begin
@@ -9640,6 +9656,7 @@ end;
 
 procedure TPdfEnum.HandleComment(Kind: TPdfGDIComment; P: PAnsiChar; Len: integer);
 var Text: RawUTF8;
+    W: integer;
 begin
   try
     case Kind of
@@ -9653,10 +9670,13 @@ begin
         SetString(Text,P,Len);
         Canvas.Doc.CreateBookMark(Canvas.I2Y(DC[nDC].Position.Y),Text);
       end;
-      pgcLink:
+      pgcLink,pgcLinkNoBorder:
       if Len>Sizeof(TRect) then begin
         SetString(Text,P+SizeOf(TRect),Len-SizeOf(TRect));
-        Canvas.Doc.CreateLink(Canvas.RectI(PRect(P)^,true),Text);
+        if Kind=pgcLink then
+          W := 1 else
+          W := 0;
+        Canvas.Doc.CreateLink(Canvas.RectI(PRect(P)^,true),Text,abSolid,W);
       end;
     end;
   except
@@ -9856,7 +9876,12 @@ end;
 function TPdfEnum.IntersectClipRect(const ClpRect: TPdfBox; const CurrRect: TPdfBox): TPdfBox;
 begin
   Result := CurrRect;
-  if (ClpRect.Width<>0) or (ClpRect.Height<>0) then begin // ignore null clipping area
+  if DC[nDC].ClipRgnNull then
+    exit; // no change
+  if (ClpRect.Width=0) or (ClpRect.Height=0) then
+    exit; // ignore null clipping area
+  if (CurrRect.Width>0) and (CurrRect.Height>0) then begin
+    // update existing region
     if ClpRect.Left > Result.Left then
       Result.Left := ClpRect.Left;
     if ClpRect.Top > Result.Top then
@@ -9870,23 +9895,45 @@ begin
       Result.Width := 0;
     if Result.Height<0 then
       Result.Height := 0;
+  end else begin
+    // current clip rect has no dimension, we need to create a new one
+    Canvas.Rectangle(ClpRect.Left,ClpRect.Top,ClpRect.Width,ClpRect.Height);
+    Canvas.Clip;
+    Canvas.NewPath;
+    Canvas.FNewPath := False;
+    DC[nDC].ClipRgnNull := false;
+    fFillColor := -1;
   end;
 end;
 
-procedure TPdfEnum.ExtSelectClipRgn(data: PRgnDataHeader; iMode: DWord);
-var ExtClip: TRect;
-begin
-  try
-    ExtClip := data^.rcBound;
-    with DC[nDC] do
-    case iMode of
-      RGN_COPY: begin
-        ClipRgn := MetaRgn;
-        ClipRgnNull := False;
-      end;
+procedure TPdfEnum.ExtSelectClipRgn(data: PEMRExtSelectClipRgn);
+var RGNs: PRgnData;
+    i: Integer;
+    RCT: TRect;
+    ClipRect: TPdfBox;
+begin // see http://www.codeproject.com/Articles/1944/Guide-to-WIN-Regions
+  if not DC[nDC].ClipRgnNull then begin
+    Canvas.GRestore;
+    Canvas.NewPath;
+    Canvas.fNewPath := False;
+    DC[nDC].ClipRgnNull := True;
+    fFillColor := -1;
+  end;
+  if Data^.cbRgnData>0 then begin
+    Canvas.GSave;
+    Canvas.NewPath;
+    DC[nDC].ClipRgnNull := False;
+    RGNs := @Data^.RgnData;
+    for i := 0 to RGNs^.rdh.nCount-1 do begin
+      Move(Rgns^.Buffer[i*SizeOf(TRect)], RCT, SizeOf(RCT));
+      Inc(RCT.Bottom);
+      ClipRect := Canvas.BoxI(RCT, False);
+      Canvas.Rectangle(ClipRect.Left,ClipRect.Top,ClipRect.Width,ClipRect.Height);
     end;
-  except
-    on E: Exception do ; // ignore any error (continue EMF enumeration)
+    Canvas.Closepath;
+    Canvas.Clip;
+    Canvas.NewPath;
+    Canvas.FNewPath := False;
   end;
 end;
 

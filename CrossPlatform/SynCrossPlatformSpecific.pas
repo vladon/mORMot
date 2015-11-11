@@ -59,27 +59,34 @@ unit SynCrossPlatformSpecific;
   {$define ISDWS}           // e.g. for SmartMobileStudio or Delphi Web Script
   {$define ISSMS}           // for SmartMobileStudio
   {$define HASINLINE}
-{$else}
+{$else}           // Delphi or FPC: select a single USE* conditional
   {$i SynCrossPlatform.inc} // define e.g. HASINLINE
   {$ifdef MSWINDOWS}
     {$ifdef FPC}
-      {$define USEFCL}  // for debugging the FCL within Lazarus
-    {$else}
-    {$ifdef UNICODE}    // for debugging Indy within the IDE
-      {$define USEINDY}
-    {$else}
-      {$define USESYNCRT}
-    {$endif}
-    {$endif}
+      {$define USESYNCRT}       // sounds to be the best choice under Windows
+      {.$define USEFCL}         // for debugging the FCL within Lazarus
+    {$else FPC}
+      {$define USESYNCRT}       // sounds to be the best choice under Windows
+      {.$define USEINDY}        // for debugging Indy within Delphi
+      {.$define USEHTTPCLIENT}  // for debugging XE8+ HttpClient within Delphi
+    {$endif FPC}
     {$define USECRITICALSECTION}
-  {$else}
+  {$else MSWINDOWS}
     {$ifdef FPC}
       {$define USEFCL}
       {$define USECRITICALSECTION}
-    {$else}
-      {$define USEINDY}
-    {$endif}
-  {$endif}
+    {$else FPC}
+      {$ifdef ISDELPHIXE8}     // use new XE8+ System.Net.HttpClient
+        {$ifdef ANDROID}
+          {$define USEHTTPCLIENT}
+        {$else ANDROID}
+          {$define USEINDY} // HttpClient has still issues with https under iOS
+        {$endif ANDROID}
+      {$else ISDELPHIXE8}
+        {$define USEINDY}
+      {$endif ISDELPHIXE8}
+    {$endif FPC}
+  {$endif MSWINDOWS}
 {$endif}
 
 interface
@@ -411,6 +418,12 @@ uses
   SynCrtSock;
 {$endif}
 
+{$ifdef USEHTTPCLIENT}
+uses
+  System.Net.UrlClient,
+  System.Net.HttpClient;
+{$endif}
+
 
 function TextToHttpBody(const Text: string): THttpBody;
 {$ifdef ISSMS}
@@ -519,8 +532,7 @@ type
     fConnection: TFPHttpClient;
   public
     constructor Create(const aParameters: TSQLRestConnectionParams); override;
-    procedure URI(var Call: TSQLRestURIParams; const InDataType: string;
-      KeepAlive: integer); override;
+    procedure URI(var Call: TSQLRestURIParams; const InDataType: string; KeepAlive: integer); override;
     destructor Destroy; override;
   end;
 
@@ -664,12 +676,100 @@ function HttpConnectionClass: TAbstractHttpConnectionClass;
 begin
   result := TIndyHttpConnectionClass;
 end;
+{$endif}
 
+{$ifdef USEHTTPCLIENT}
+type
+  THttpClientHttpConnectionClass = class(TAbstractHttpConnection)
+  protected
+    fConnection: THttpClient;
+    procedure DoValidateServerCertificate(const Sender: TObject;
+      const ARequest: TURLRequest; const Certificate: TCertificate; var Accepted: Boolean);
+  public
+    constructor Create(const aParameters: TSQLRestConnectionParams); override;
+    procedure URI(var Call: TSQLRestURIParams; const InDataType: string; KeepAlive: integer); override;
+    destructor Destroy; override;
+  end;
+
+{ TFclHttpConnectionClass }
+
+constructor THttpClientHttpConnectionClass.Create(const aParameters: TSQLRestConnectionParams);
+begin
+  inherited Create(aParameters);
+  fConnection := THttpClient.Create;
+  fConnection.OnValidateServerCertificate := DoValidateServerCertificate;
+  fOpaqueConnection := fConnection;
+end;
+
+function NetHeadersToText(const AHeaders: TNetHeaders): string;
+var i: integer;
+begin
+  result := '';
+  for i := 0 to High(AHeaders) do
+    with AHeaders[i] do
+      result := result+Name+': '+Value+#13#10;
+end;
+
+procedure THttpClientHttpConnectionClass.URI(var Call: TSQLRestURIParams; const InDataType: string; KeepAlive: integer);
+var
+  InStr, OutStr: TStream;
+  OutLen: integer;
+  LResponse : IHTTPResponse;
+begin
+  InStr := TMemoryStream.Create;
+  OutStr := TMemoryStream.Create;
+  try
+    if Call.InBody<>nil then begin
+      InStr.Write(Call.InBody[0],length(Call.InBody));
+      InStr.Seek(0,soBeginning);
+    end;
+    LResponse := nil;
+    if Call.Verb='GET' then // allow 404 as valid Call.OutStatus
+      LResponse := fConnection.Get(fURL+Call.Url,OutStr)
+    else if Call.Verb='POST' then
+      LResponse := fConnection.Post(fURL+Call.Url,InStr,OutStr)
+    else if Call.Verb='PUT' then
+      LResponse := fConnection.Put(fURL+Call.Url,InStr)
+    else if Call.Verb='DELETE' then
+      LResponse := fConnection.Delete(fURL+Call.Url)
+    else
+      raise Exception.CreateFmt('Indy does not know method %s',[Call.Verb]);
+    if LResponse <> nil then begin
+      Call.OutStatus := LResponse.StatusCode;
+      Call.OutHead := NetHeadersToText(LResponse.Headers);
+      OutLen := OutStr.Size;
+      if OutLen>0 then begin
+        SetLength(Call.OutBody,OutLen);
+        OutStr.Seek(0,soBeginning);
+        OutStr.Read(Call.OutBody[0],OutLen);
+      end;
+    end;
+  finally
+    OutStr.Free;
+    InStr.Free;
+  end;
+end;
+
+destructor THttpClientHttpConnectionClass.Destroy;
+begin
+  fConnection.Free;
+  inherited Destroy;
+end;
+
+procedure THttpClientHttpConnectionClass.DoValidateServerCertificate(const Sender: TObject;
+  const ARequest: TURLRequest; const Certificate: TCertificate; var Accepted: Boolean);
+begin
+  Accepted := True;
+end;
+
+function HttpConnectionClass: TAbstractHttpConnectionClass;
+begin
+  result := THttpClientHttpConnectionClass;
+end;
 
 {$endif}
 
 {$ifdef USESYNCRT}
-
 type
   TWinHttpConnectionClass = class(TAbstractHttpConnection)
   protected

@@ -3,7 +3,7 @@ object MainLogView: TMainLogView
   Top = 166
   Width = 860
   Height = 639
-  Caption = ' Synopse LogView - '
+  Caption = ' Synopse LogView  %s -'
   Color = clBtnFace
   Font.Charset = DEFAULT_CHARSET
   Font.Color = clWindowText
@@ -459,6 +459,10 @@ object MainLogView: TMainLogView
     object ThreadListMenuNone: TMenuItem
       Caption = 'Select None'
       OnClick = ThreadListMenuClick
+    end
+    object ThreadListMenuThis: TMenuItem
+      Caption = 'Select Only This'
+      OnClick = ThreadListMenuThisClick
     end
   end
   object ListMenu: TPopupMenu

@@ -2164,14 +2164,21 @@ function WriteObject(Value: TObject): RawUTF8; overload;
 // TSQLRecord children (in this case, these are not class instances, but
 // INTEGER reference to records, so only the integer value is copied), that is
 // for regular Delphi classes
-procedure CopyObject(aFrom, aTo: TObject);
+procedure CopyObject(aFrom, aTo: TObject); overload;
+
+/// create a new object instance, from an existing one
+// - will create a new instance of the same class, then call the overloaded
+// CopyObject() procedure to copy its values
+function CopyObject(aFrom: TObject): TObject; overload;
 
 /// copy two TStrings instances
+// - will just call Dest.Assign(Source) in practice
 procedure CopyStrings(Source, Dest: TStrings);
 
 {$ifndef LVCL}
 /// copy two TCollection instances
-// - will call CopyObject() in loop to repopulate the Dest collection
+// - will call CopyObject() in loop to repopulate the Dest collection,
+// which would work even if Assign() method was not overriden
 procedure CopyCollection(Source, Dest: TCollection);
 {$endif}
 
@@ -2762,6 +2769,8 @@ type
      {$ifdef USETYPEINFO}{$ifdef HASINLINE}inline;{$endif}{$endif}
     procedure SetLongStrProp(Instance: TObject; const Value: RawByteString);
      {$ifdef USETYPEINFO}{$ifdef HASINLINE}inline;{$endif}{$endif}
+    procedure CopyLongStrProp(Source,Dest: TObject);
+     {$ifdef USETYPEINFO}{$ifdef HASINLINE}inline;{$endif}{$endif}
     procedure GetWideStrProp(Instance: TObject; var Value: WideString);
      {$ifdef USETYPEINFO}{$ifdef HASINLINE}inline;{$endif}{$endif}
     procedure SetWideStrProp(Instance: TObject; const Value: WideString);
@@ -3217,8 +3226,7 @@ type
     function SetBinary(Instance: TObject; P: PAnsiChar): PAnsiChar; virtual; abstract;
     /// copy a property value from one instance to another
     // - both objects should have the same exact property
-    procedure CopyValue(Source, Dest: TObject);
-      {$ifdef HASINLINE}inline;{$endif}
+    procedure CopyValue(Source, Dest: TObject); virtual;
     /// copy a value from one instance to another property instance
     // - if the property has been flattened (for a TSQLPropInfoRTTI), the real
     // Source/Dest instance will be used for the copy
@@ -3276,6 +3284,7 @@ type
     fPropInfo: PPropInfo;
     fPropType: PTypeInfo;
     fFlattenedProps: PPropInfoDynArray;
+    fInPlaceCopySameClassPropOffset: cardinal;
     function GetSQLFieldRTTITypeName: RawUTF8; override;
   public
     /// this meta-constructor will create an instance of the exact descendant
@@ -3451,6 +3460,7 @@ type
     procedure SetValueVar(Instance: TObject; const Value: RawUTF8; wasString: boolean); override;
     procedure GetValueVar(Instance: TObject; ToSQL: boolean;
       var result: RawUTF8; wasSQLString: PBoolean); override;
+    procedure CopyValue(Source, Dest: TObject); override;
     procedure GetBinary(Instance: TObject; W: TFileBufferWriter); override;
     function SetBinary(Instance: TObject; P: PAnsiChar): PAnsiChar; override;
     procedure GetJSONValues(Instance: TObject; W: TJSONSerializer); override;
@@ -3520,6 +3530,7 @@ type
     procedure SetValue(Instance: TObject; Value: PUTF8Char; wasString: boolean); override;
     procedure GetValueVar(Instance: TObject; ToSQL: boolean;
       var result: RawUTF8; wasSQLString: PBoolean); override;
+    procedure CopyValue(Source, Dest: TObject); override;
     procedure GetBinary(Instance: TObject; W: TFileBufferWriter); override;
     function SetBinary(Instance: TObject; P: PAnsiChar): PAnsiChar; override;
     procedure GetJSONValues(Instance: TObject; W: TJSONSerializer); override;
@@ -3537,6 +3548,7 @@ type
     procedure SetValueVar(Instance: TObject; const Value: RawUTF8; wasString: boolean); override;
     procedure GetValueVar(Instance: TObject; ToSQL: boolean;
       var result: RawUTF8; wasSQLString: PBoolean); override;
+    procedure CopyValue(Source, Dest: TObject); override;
     procedure GetBinary(Instance: TObject; W: TFileBufferWriter); override;
     function SetBinary(Instance: TObject; P: PAnsiChar): PAnsiChar; override;
     procedure GetJSONValues(Instance: TObject; W: TJSONSerializer); override;
@@ -7206,7 +7218,7 @@ type
     // - handle UTF-8 SQL to Delphi values conversion (see TPropInfo mapping)
     // - this method has been made virtual e.g. so that a calculated value can be
     // used in a custom field
-    procedure FillRow(aRow: integer; aDest: TSQLRecord=nil); virtual;
+    function FillRow(aRow: integer; aDest: TSQLRecord=nil): boolean; virtual;
     /// fill all published properties of this object from the next available
     // TSQLTable prepared row
     // - FillPrepare() must have been called before
@@ -7660,14 +7672,22 @@ type
     // - will call W.FlushToStream, then append all content
     procedure GetJSONValues(W: TTextWriter; Expand: boolean;
       RowFirst: integer=0; RowLast: integer=0); overload;
-    /// save the table in CSV format
+    /// save the table as CSV format, into a stream
     // - if Tab=TRUE, will use TAB instead of ',' between columns
     // - you can customize the ',' separator - use e.g. the global ListSeparator
     // variable (from SysUtils) to reflect the current system definition (some
     // country use ',' as decimal separator, for instance our "douce France")
     // - AddBOM will add a UTF-8 Byte Order Mark at the beginning of the content
     procedure GetCSVValues(Dest: TStream; Tab: boolean; CommaSep: AnsiChar=',';
-      AddBOM: boolean=false);
+      AddBOM: boolean=false; RowFirst: integer=0; RowLast: integer=0); overload;
+    /// save the table as CSV format, into a string variable
+    // - if Tab=TRUE, will use TAB instead of ',' between columns
+    // - you can customize the ',' separator - use e.g. the global ListSeparator
+    // variable (from SysUtils) to reflect the current system definition (some
+    // country use ',' as decimal separator, for instance our "douce France")
+    // - AddBOM will add a UTF-8 Byte Order Mark at the beginning of the content
+    function GetCSVValues(Tab: boolean; CommaSep: AnsiChar=',';
+      AddBOM: boolean=false; RowFirst: integer=0; RowLast: integer=0): RawUTF8; overload;
     /// save the table in 'schemas-microsoft-com:rowset' XML format
     // - this format is used by ADODB.recordset, easily consummed by MS apps
     // - see @http://synopse.info/forum/viewtopic.php?pid=11691#p11691
@@ -7681,7 +7701,12 @@ type
     // - this method will return the raw binary buffer of the file
     // - see @http://synopse.info/forum/viewtopic.php?id=2133
     function GetODSDocument: RawByteString;
-
+    /// append the table content as a HTML <table> ... </table>
+    procedure GetHtmlTable(Dest: TTextWriter); overload;
+    /// save the table as a <html><body><table> </table></body></html> content
+    function GetHtmlTable(const Header: RawUTF8='<head><style>table,th,td'+
+      '{border: 1px solid black;border-collapse: collapse;}th,td{padding: 5px;'+
+      'font-family: sans-serif;}</style></head>'#10): RawUTF8; overload;
     /// get the Field index of a FieldName
     // - return -1 if not found, index (0..FieldCount-1) if found
     function FieldIndex(FieldName: PUTF8Char): integer; overload;
@@ -8236,27 +8261,39 @@ type
   end;
 
   /// standard actions for User Interface generation
+  // - actNoAction for not defined action
+  // - actMark (standard action) to Mark rows, i.e. display sub-menu with
+  // actmarkAllEntries..actmarkOlderThanOneYear items
+  // - actUnmarkAll (standard action) to UnMark all rows
+  // - actmarkAllEntries to Mark all rows
+  // - actMarkForToday to Mark rows for today
+  // - actMarkForThisWeek to Mark rows for This Week
+  // - actMarkForThisMonth to Mark rows for this month
+  // - actMarkForYestday to Mark rows for today
+  // - actMarkForLastWeek to Mark rows for Last Week
+  // - actMarkForLastMonth to Mark rows for Last month
+  // - actmarkOlderThanOneDay to Mark rows After one day
+  // - actmarkOlderThanOneWeek to Mark rows older than one week
+  // - actmarkOlderThanOneMonth to Mark rows older than one month
+  // - actmarkOlderThanSixMonths to Mark rows older than one half year
+  // - actmarkOlderThanOneYear to Mark rows older than one year
+  // - actmarkInverse to Inverse Mark values (ON->OFF, OFF->ON)
   TSQLAction = (
-    /// action not defined
     actNoAction,
-    /// Mark rows (standard action)
-    // - display sub-menu with actmarkAllEntries..actmarkBeforeOneYear items
     actMark,
-    /// UnMark all rows (standard action)
     actUnmarkAll,
-    /// Mark all rows
     actmarkAllEntries,
-    /// Mark rows After one day
+    actmarkToday,
+    actmarkThisWeek,
+    actmarkThisMonth,
+    actmarkYesterday,
+    actmarkLastWeek,
+    actmarkLastMonth,
     actmarkOlderThanOneDay,
-    /// Mark rows older than one week
     actmarkOlderThanOneWeek,
-    /// Mark rows older than one month
     actmarkOlderThanOneMonth,
-    /// Mark rows older than one half year
     actmarkOlderThanSixMonths,
-    /// Mark rows older than one year
     actmarkOlderThanOneYear,
-    /// Inverse Mark values (ON->OFF, OFF->ON)
     actmarkInverse);
 
   /// set of standard actions for User Interface generation
@@ -9902,7 +9939,8 @@ type
     // - corresponding to the response type, as defined in Header
     Content: RawByteString;
     /// the HTML response code
-    // - if not overriden, will default to HTML_SUCCESS = 200
+    // - if not overriden, will default to HTML_SUCCESS = 200 on server side
+    // - on client side, would always contain HTML_SUCCESS = 200
     Status: cardinal;
   end;
 
@@ -13282,6 +13320,7 @@ type
     // a reference time base
     property ServerTimeStamp: TTimeLog read GetServerTimeStamp write SetServerTimeStamp;
     /// used e.g. by IAdministratedDaemon to implement "pseudo-SQL" commands
+    // - this default implementation will handle #time #model #rest commands
     procedure AdministrationExecute(const DatabaseName,SQL: RawUTF8; var result: RawJSON); virtual;
     /// access to the interface-based services list
     // - may be nil if no service interface has been registered yet: so be
@@ -14097,7 +14136,7 @@ type
   // - if ClientSetUser() receives aUserName as 'DomainName\UserName', then
   // authentication will take place on the specified domain, with aPassword
   // as plain password value
-  TSQLRestServerAuthenticationSSPI = class(TSQLRestServerAuthenticationURI)
+  TSQLRestServerAuthenticationSSPI = class(TSQLRestServerAuthenticationSignedURI)
   protected
     /// Windows built-in authentication
     // - holds information between calls to ServerSSPIAuth
@@ -18964,6 +19003,9 @@ begin
     aPropInfo^.Index,aPropIndex); // property MyProperty: RawUTF8 index 10; -> FieldWidth=10
   fPropInfo := aPropInfo;
   fPropType := aPropInfo^.PropType{$ifndef FPC}^{$endif};
+  if aPropInfo.GetterIsField and
+     ((aPropInfo.SetProc=0) or (aPropInfo.SetProc=fPropInfo.GetProc)) then
+    fInPlaceCopySameClassPropOffset := aPropInfo.GetProc {$ifndef FPC} and $00FFFFFF{$endif};
   fFromRTTI := true;
 end;
 
@@ -19619,12 +19661,12 @@ begin
 end;
 
 
+
 { TSQLPropInfoRTTIIObject }
 
 procedure TSQLPropInfoRTTIObject.CopySameClassProp(Source: TObject;
   DestInfo: TSQLPropInfo; Dest: TObject);
 var S,D: TObject;
-    DInst: TClassInstance;
 begin
   // generic case: copy also class content (create instances)
   S := GetInstance(Source);
@@ -19636,14 +19678,7 @@ begin
   if S.InheritsFrom(TStrings) and D.InheritsFrom(TStrings) then
     CopyStrings(TStrings(S),TStrings(D)) else begin
     D.Free; // release previous instance
-    try
-      DInst.Init(S.ClassType);
-      D := DInst.CreateNew;
-      CopyObject(S,D); // copy child content
-    except
-      FreeAndNil(D); // avoid memory leak if error during new instance copy
-    end;
-    SetInstance(Dest,D);
+    TSQLPropInfoRTTIObject(DestInfo).SetInstance(Dest,CopyObject(S));
   end;
 end;
 
@@ -19827,6 +19862,14 @@ begin
   temp := fEngine.AnsiToUTF8(temp);
   aValue.VType := ftUTF8;
   aValue.VText := pointer(temp);
+end;
+
+procedure TSQLPropInfoRTTIAnsi.CopyValue(Source, Dest: TObject);
+begin // avoid temporary variable use, for simple fields with no getter/setter
+  if fInPlaceCopySameClassPropOffset=0 then
+    fPropInfo.CopyLongStrProp(Source,Dest) else
+    PRawByteString(PtrUInt(Dest)+fInPlaceCopySameClassPropOffset)^ :=
+      PRawByteString(PtrUInt(Source)+fInPlaceCopySameClassPropOffset)^;
 end;
 
 
@@ -20142,6 +20185,14 @@ begin
     wasSQLString^ := true;
 end;
 
+procedure TSQLPropInfoRTTIWide.CopyValue(Source, Dest: TObject);
+begin // avoid temporary variable use, for simple fields with no getter/setter
+  if fInPlaceCopySameClassPropOffset=0 then
+    CopySameClassProp(Source,self,Dest) else
+    PWideString(PtrUInt(Dest)+fInPlaceCopySameClassPropOffset)^ :=
+      PWideString(PtrUInt(Source)+fInPlaceCopySameClassPropOffset)^;
+end;
+
 function TSQLPropInfoRTTIWide.CompareValue(Item1, Item2: TObject;
   CaseInsensitive: boolean): PtrInt;
 var tmp1,tmp2: WideString;
@@ -20190,6 +20241,14 @@ end;
 procedure TSQLPropInfoRTTIUnicode.GetBinary(Instance: TObject; W: TFileBufferWriter);
 begin
   W.Write(UnicodeStringToUtf8(fPropInfo.GetUnicodeStrProp(Instance)));
+end;
+
+procedure TSQLPropInfoRTTIUnicode.CopyValue(Source, Dest: TObject);
+begin // avoid temporary variable use, for simple fields with no getter/setter
+  if fInPlaceCopySameClassPropOffset=0 then
+    CopySameClassProp(Source,self,Dest) else
+    PUnicodeString(PtrUInt(Dest)+fInPlaceCopySameClassPropOffset)^ :=
+      PUnicodeString(PtrUInt(Source)+fInPlaceCopySameClassPropOffset)^;
 end;
 
 function TSQLPropInfoRTTIUnicode.GetHash(Instance: TObject; CaseInsensitive: boolean): cardinal;
@@ -20428,20 +20487,21 @@ end;
 
 procedure TSQLPropInfoRTTIDynArray.SetValue(Instance: TObject;
   Value: PUTF8Char; wasString: boolean);
-var blob: RawByteString;
+var tmp: RawByteString;
     wrapper: TDynArray;
 begin
   GetDynArray(Instance,wrapper);
   if fObjArray<>nil then begin
-    wrapper.LoadFromJSON(Value);
+    SetString(tmp,PAnsiChar(Value),StrLen(Value)); // make private copy
+    wrapper.LoadFromJSON(pointer(tmp));
     exit;
   end;
   if Value=nil then
     wrapper.Clear else
-  if Base64MagicCheckAndDecode(Value,blob) then
-    wrapper.LoadFrom(pointer(blob)) else begin
-    blob := Value; // private copy since LoadFromJSON() modifies buffer in-place
-    wrapper.LoadFromJSON(Pointer(blob));
+  if Base64MagicCheckAndDecode(Value,tmp) then
+    wrapper.LoadFrom(pointer(tmp)) else begin
+    SetString(tmp,PAnsiChar(Value),StrLen(Value)); // make private copy
+    wrapper.LoadFromJSON(pointer(tmp));
   end;
 end;
 
@@ -22766,13 +22826,17 @@ begin
 end;
 
 procedure TSQLTable.GetCSVValues(Dest: TStream; Tab: boolean; CommaSep: AnsiChar=',';
-  AddBOM: boolean=false);
+  AddBOM: boolean=false; RowFirst: integer=0; RowLast: integer=0);
 var U: PPUTF8Char;
     F,R,FMax: integer;
     W: TTextWriter;
 begin
   if (self=nil) or (FieldCount<=0) or (fRowCount<=0) then
     exit;
+  if (RowLast=0) or (RowLast>fRowCount) then
+    RowLast := fRowCount;
+  if RowFirst<0 then
+    RowFirst := 0;
   W := TTextWriter.Create(Dest,16384);
   try
     if AddBOM then
@@ -22780,8 +22844,8 @@ begin
     if Tab then
       CommaSep := #9;
     FMax := FieldCount-1;
-    U := pointer(fResults);
-    for R := 0 to fRowCount do
+    U := @fResults[RowFirst*FieldCount];
+    for R := RowFirst to RowLast do
       for F := 0 to FMax do begin
         if Tab or (not IsStringJSON(U^)) then
           W.AddNoJSONEscape(U^,StrLen(U^)) else begin
@@ -22797,6 +22861,19 @@ begin
     W.FlushFinal;
   finally
     W.Free;
+  end;
+end;
+
+function TSQLTable.GetCSVValues(Tab: boolean; CommaSep: AnsiChar=',';
+  AddBOM: boolean=false; RowFirst: integer=0; RowLast: integer=0): RawUTF8;
+var MS: TRawByteStringStream;
+begin
+  MS := TRawByteStringStream.Create;
+  try
+    GetCSVValues(MS,Tab,CommaSep,AddBOM,RowFirst,RowLast);
+    result := MS.DataString;
+  finally
+    MS.Free;
   end;
 end;
 
@@ -22967,6 +23044,45 @@ begin
   end;
 end;
 
+procedure TSQLTable.GetHtmlTable(Dest: TTextWriter);
+var R,F: integer;
+    U: PPUTF8Char;
+begin
+  Dest.AddShort('<table>'#10);
+  U := pointer(fResults);
+  for R := 0 to fRowCount do begin
+    Dest.AddShort('<tr>');
+    for F := 1 to FieldCount do begin
+      if R=0 then
+        Dest.AddShort('<th>') else
+        Dest.AddShort('<td>');
+      Dest.AddHtmlEscape(U^,hfOutsideAttributes);
+      if R=0 then
+        Dest.AddShort('</th>') else
+        Dest.AddShort('</td>');
+      inc(U); // points to next value
+    end;
+    Dest.AddShort('</tr>'#10);
+  end;
+  Dest.AddShort('</table>');
+end;
+
+function TSQLTable.GetHtmlTable(const Header: RawUTF8): RawUTF8;
+var W: TTextWriter;
+begin
+  W := TTextWriter.CreateOwnedStream(16384);
+  try
+    W.AddShort('<html>');
+    W.AddString(Header);
+    W.AddShort('<body>'#10);
+    GetHtmlTable(W);
+    W.AddShort(#10'</body></html>');
+    W.SetText(result);
+  finally
+    W.Free;
+  end;
+end;
+  
 function TSQLTable.GetW(Row, Field: integer): RawUnicode;
 begin
   result := UTF8DecodeToRawUnicode(Get(Row,Field),0);
@@ -25901,6 +26017,15 @@ begin
   {$endif}
 end;
 
+procedure TPropInfo.CopyLongStrProp(Source,Dest: TObject);
+begin
+  {$ifdef UNICODE}
+  TypInfo.SetAnsiStrProp(Dest,@self,TypInfo.GetAnsiStrProp(Source,@self));
+  {$else}
+  SetStrProp(Dest,@self,TypInfo.GetStrProp(Source,@self));
+  {$endif}
+end;
+
 procedure TPropInfo.GetWideStrProp(Instance: TObject; var Value: WideString);
 begin
   Value := TypInfo.GetWideStrProp(Instance,@self);
@@ -26149,6 +26274,13 @@ begin // caller must check that PropType^.Kind = tkLString
         TSetProp(Call)(Value) else
         TIndexedProp(Call)(Index,Value);
   end;
+end;
+
+procedure TPropInfo.CopyLongStrProp(Source,Dest: TObject);
+var tmp: RawByteString;
+begin
+  GetLongStrProp(Source,tmp);
+  SetLongStrProp(Dest,tmp);
 end;
 
 procedure TPropInfo.GetWideStrProp(Instance: TObject; var Value: WideString);
@@ -27766,15 +27898,16 @@ begin
       Int64DynArrayToCSV(aIDs,length(aIDs),'ID in (',')'),aCustomFieldsCSV);
 end;
 
-procedure TSQLRecord.FillRow(aRow: integer; aDest: TSQLRecord=nil);
+function TSQLRecord.FillRow(aRow: integer; aDest: TSQLRecord): boolean;
 begin
   if self<>nil then
     if aDest=nil then
-      fFill.Fill(aRow) else
+      result := fFill.Fill(aRow) else
       if fFill.fTableMapRecordManyInstances=nil then
-        fFill.Fill(aRow,aDest) else
+        result := fFill.Fill(aRow,aDest) else
         raise EBusinessLayerException.CreateUTF8(
-          '%.FillRow() forbidden after FillPrepareMany',[self]);
+          '%.FillRow() forbidden after FillPrepareMany',[self]) else
+    result := false;
 end;
 
 function TSQLRecord.FillOne: boolean;
@@ -40118,7 +40251,7 @@ begin
     if i<0 then
       result := nil else begin
       result := fStoredClass.Create;
-      CopyObject(fValue.List[i],result);
+      CopyObject(TObject(fValue.List[i]),result);
       result.fID := aID;
     end;
   finally
@@ -40212,7 +40345,7 @@ begin
       exit;
     if (fUniqueFields<>nil) and not UniqueFieldsUpdateOK(Rec,i) then
       exit; // stored false property duplicated value -> error
-    CopyObject(Rec,fValue.List[i]);
+    CopyObject(Rec,TObject(fValue.List[i]));
     fModified := true;
     result := true;
     if Owner<>nil then
@@ -41751,6 +41884,7 @@ begin
   end;
 end;
 
+
 procedure CopyObject(aFrom, aTo: TObject);
 var P,P2: PPropInfo;
     i: integer;
@@ -41798,6 +41932,22 @@ begin
     until C=TObject;
 end;
 
+function CopyObject(aFrom: TObject): TObject; 
+var DInst: TClassInstance;
+begin
+  if aFrom=nil then begin
+    result := nil;
+    exit;
+  end;
+  DInst.Init(aFrom.ClassType);
+  result := DInst.CreateNew;
+  try
+    CopyObject(aFrom,result);
+  except
+    FreeAndNil(result); // avoid memory leak if error during new instance copy
+  end;
+end;
+
 {$ifndef LVCL}
 procedure CopyCollection(Source, Dest: TCollection);
 var i: integer;
@@ -41808,7 +41958,7 @@ begin
   try
     Dest.Clear;
     for i := 0 to Source.Count-1 do
-      CopyObject(Source.Items[i],Dest.Add); // Assign() fails
+      CopyObject(Source.Items[i],Dest.Add); // Assign() fails for most objects
   finally
     Dest.EndUpdate;
   end;
@@ -41819,16 +41969,11 @@ procedure CopyStrings(Source, Dest: TStrings);
 begin
   if (Source=nil) or (Dest=nil) then
     exit;
-  {$ifndef LVCL}
-  Dest.BeginUpdate;
-  try
-  {$endif}
-    Dest.Clear;
-    Dest.AddStrings(Source);
-  {$ifndef LVCL}
-  finally
-    Dest.EndUpdate;
-  end;
+  {$ifdef LVCL}
+  Dest.Clear;
+  Dest.AddStrings(Source);
+  {$else}
+  Dest.Assign(Source);
   {$endif}
 end;
 
@@ -45960,15 +46105,20 @@ var aUserName: RawUTF8;
     aSessionID: cardinal;
     i: integer;
 begin
+  result := false;
+  if fServer.fSessions=nil then
+    exit;
   aUserName := Ctxt.InputUTF8OrVoid['UserName'];
+  if aUserName='' then
+    exit;
   aSessionID := Ctxt.InputIntOrVoid['Session'];
   if aSessionID=0 then
     aSessionID := Ctxt.InputHexaOrVoid['SessionHex'];
-  if (aUserName<>'') and (aSessionID<>0) then begin
-    // GET ModelRoot/auth?UserName=...&Session=... -> release session
-  if (fServer.fSessions<>nil) and
-     // allow only to delete its own session - ticket [7723fa7ebd]
-     (aSessionID=Ctxt.Session) then
+  if aSessionID=0 then
+    exit;
+  result := true; // recognized GET ModelRoot/auth?UserName=...&Session=...
+  // allow only to delete its own session - ticket [7723fa7ebd]
+  if aSessionID=Ctxt.Session then
     for i := 0 to fServer.fSessions.Count-1 do
       with TAuthSession(fServer.fSessions.List[i]) do
       if (fIDCardinal=aSessionID) and (fUser.LogonName=aUserName) then begin
@@ -45976,9 +46126,6 @@ begin
         Ctxt.Success;
         break;
       end;
-    result := true;
-  end else
-    result := false;
 end;
 
 function TSQLRestServerAuthentication.GetUser(Ctxt: TSQLRestServerURIContext;
@@ -52175,6 +52322,7 @@ begin
     end;
   end else begin // free answer returned in TServiceCustomAnswer
     fRest.InternalLog('TServiceCustomAnswer(%) returned len=%',[head,length(resp)],sllServiceReturn);
+    aServiceCustomAnswer^.Status := status;
     aServiceCustomAnswer^.Header := head;
     aServiceCustomAnswer^.Content := resp;
     if aClientDrivenID<>nil then
@@ -52226,7 +52374,7 @@ begin
   with TInterfacedObjectFake(fSharedInstance) do
     if fRefCount<>1 then
       raise EServiceException.CreateUTF8('%.Destroy with RefCount=%: you must release '+
-        'I% interface (:= nil) before Client.Free',[self,fRefCount,fInterfaceURI]) else
+        'I% interface (setting := nil) before Client.Free',[self,fRefCount,fInterfaceURI]) else
       _Release; // bonne nuit les petits
   inherited;
 end;

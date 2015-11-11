@@ -138,6 +138,10 @@ type
     /// read-only access to the underlying daemon instance
     // - equals nil if the daemon is not started
     property Daemon: IAdministratedDaemon read fDaemon;
+    /// returns the class instance implementing the underlying Daemon
+    // - you should transtype the returned instance using e.g.
+    // !  myDaemon := mainDaemon.DaemonInstance as TMyDaemonClass;
+    function DaemonInstance: TObject;
   published
   end;
   {$M-}
@@ -223,7 +227,8 @@ type
   public
     /// set the default values for Client.Root, ORM.ServerName,
     // Client.WebSocketsPassword and ORM.Password
-    procedure SetDefaults(const Root,Port,WebSocketPassword,UserPassword: RawUTF8);
+    procedure SetDefaults(const Root,Port,WebSocketPassword,UserPassword: RawUTF8;
+      const User: RawUTF8='User');
     /// is able to instantiate a Client REST instance for the stored definition
     // - Definition.Kind is expected to specify a TSQLRestClient class to be
     // instantiated, not a TSQLRestServer instance
@@ -537,6 +542,11 @@ begin
     raise EDDDInfraException.CreateUTF8('%.Create(settings=nil)',[self]);
   fSettings := aSettings;
   fSettingsRef := aSettings;
+end;
+
+function TDDDDaemon.DaemonInstance: TObject;
+begin
+  result := ObjectFromInterface(fDaemon);
 end;
 
 destructor TDDDDaemon.Destroy;
@@ -1399,7 +1409,7 @@ begin
 end;
 
 procedure TDDDRestClientSettings.SetDefaults(const Root,Port,WebSocketPassword,
-  UserPassword: RawUTF8);
+  UserPassword,User: RawUTF8);
 begin
   if fClient.Root='' then
     fClient.Root := Root;
@@ -1412,7 +1422,7 @@ begin
     if fClient.WebSocketsPassword='' then
       fClient.WebSocketsPassword := WebSocketPassword;
     if UserPassword<>'' then begin
-      fORM.User := 'User';
+      fORM.User := User;
       fORM.PasswordPlain := UserPassword;
     end;
   end;
