@@ -722,7 +722,9 @@ type
 var
   /// if set, will log all WebSockets raw information
   // - see also TWebSocketProcessSettings.LogDetails and
-  // TWebSocketProcessSettings.SetFullLog to setup even more verbose information
+  // TWebSocketProcessSettings.SetFullLog to setup even more verbose information,
+  // e.g. by setting HttpServerFullWebSocketsLog and HttpClientFullWebSocketsLog
+  // global variables to true (as defined in mORMotHttpServer/mORMotHttpClient)
   WebSocketLog: TSynLogClass;
 
 
@@ -2246,7 +2248,7 @@ begin
   if (fProcess<>nil) and (fProcess.fState=wpsClose) then
     fThreadState := sClosed else
     fThreadState := sFinished;
-  WebSocketLog.Add.Log(sllDebug,'%.Execute: ThreadState=%',[ClassType,
+  WebSocketLog.Add.Log(sllDebug,'%.Execute finished: ThreadState=%',[ClassType,
     GetEnumName(TypeInfo(TWebSocketProcessClientThreadState),Ord(fThreadState))^],self);
 end;
 
